@@ -18,8 +18,20 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 
     <style>
-        html, body { height: 100%; margin: 0; font-family: 'Inter', sans-serif; overflow: hidden; }
-        #map { width: 100%; height: 100%; z-index: 10; cursor: crosshair; }
+        /* CRITICAL FIX: Ensure the body and html tags take up the full height */
+        html, body { 
+            height: 100%; 
+            margin: 0; 
+            font-family: 'Inter', sans-serif; 
+            overflow: hidden; 
+        }
+        /* CRITICAL FIX: The map container must have a defined height to render */
+        #map { 
+            width: 100%; 
+            height: 100%; 
+            z-index: 10; 
+            cursor: crosshair; 
+        }
         .leaflet-popup-content-wrapper { background-color: #2d3748; color: #f7fafc; border-radius: 8px; }
         .leaflet-popup-tip { background-color: #2d3748; }
         .leaflet-popup-close-button { color: #f7fafc !important; }
@@ -112,9 +124,30 @@
         const auth = getAuth(app);
 
         // --- Map Init ---
-        const PROPERTY_COORDS = [31.2492, -99.8523]; // Centered on 11511 Co Rd 2246, Eden, TX
-        const map = L.map('map').setView(PROPERTY_COORDS, 15);
-        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}').addTo(map);
+        // Moved map initialization to a function to be called after the DOM is loaded
+        let map;
+        function initializeMap() {
+            const PROPERTY_COORDS = [31.2492, -99.8523]; // Centered on 11511 Co Rd 2246, Eden, TX
+            map = L.map('map').setView(PROPERTY_COORDS, 15);
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}').addTo(map);
+            
+            // Re-attach event listeners that depend on the map object
+            map.on('click', onMapClick);
+            map.on(L.Draw.Event.CREATED, (e) => {
+                const layer = e.layer;
+                if (e.layerType === 'polygon') {
+                    if (confirm('Save this as the property boundary?')) {
+                        if (boundaryLayer) map.removeLayer(boundaryLayer);
+                        boundaryLayer = layer.addTo(map);
+                        saveBoundary(layer);
+                    }
+                } else if (e.layerType === 'polyline') {
+                    const distance = (layer.getLatLngs().reduce((acc, latlng, i, arr) => i === 0 ? 0 : acc + latlng.distanceTo(arr[i-1]), 0) * 1.09361).toFixed(1);
+                    layer.bindPopup(`Distance: ${distance} yards`).addTo(map).openPopup();
+                }
+            });
+        }
+
 
         // --- Global State ---
         let currentUser = null;
@@ -140,29 +173,39 @@
         const compassDiv = document.getElementById('compass');
 
         // --- Leaflet Draw ---
-        const drawnItems = new L.FeatureGroup().addTo(map);
-        const drawControl = new L.Control.Draw({
-            edit: { featureGroup: drawnItems, remove: true },
-            draw: {
-                polygon: { shapeOptions: { color: '#ffca28' } },
-                polyline: true,
-                rectangle: false, circle: false, marker: false, circlemarker: false
-            }
-        });
+        let drawnItems, drawControl;
+        function initializeDrawControls() {
+            drawnItems = new L.FeatureGroup().addTo(map);
+            drawControl = new L.Control.Draw({
+                edit: { featureGroup: drawnItems, remove: true },
+                draw: {
+                    polygon: { shapeOptions: { color: '#ffca28' } },
+                    polyline: true,
+                    rectangle: false, circle: false, marker: false, circlemarker: false
+                }
+            });
+        }
 
         // --- Authentication ---
-        onAuthStateChanged(auth, async (user) => {
-            if (user) {
-                currentUser = user;
-                userInfoDiv.innerHTML = `Session ID: <span class="font-mono text-xs">${user.uid}</span>`;
-                listenForBlinds();
-                loadBoundary();
-            } else { currentUser = null; }
-        });
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-            await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-            await signInAnonymously(auth);
+        async function setupAuthentication() {
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    currentUser = user;
+                    userInfoDiv.innerHTML = `Session ID: <span class="font-mono text-xs">${user.uid}</span>`;
+                    listenForBlinds();
+                    loadBoundary();
+                    checkSharedBlind(); // Check for shared links after user is authenticated
+                } else { currentUser = null; }
+            });
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Authentication Error:", error);
+            }
         }
 
         // --- Firestore Logic ---
@@ -223,7 +266,6 @@
             });
             const marker = L.marker([blind.lat, blind.lng], { icon }).addTo(map);
             
-            // --- Popup Content ---
             const popupContent = document.createElement('div');
             popupContent.innerHTML = `<strong class="text-lg">${blind.name}</strong><p class="text-gray-300 my-2">${blind.notes || ''}</p>`;
             
@@ -363,21 +405,6 @@
         }
 
         // --- Event Listeners ---
-        map.on('click', onMapClick);
-        map.on(L.Draw.Event.CREATED, (e) => {
-            const layer = e.layer;
-            if (e.layerType === 'polygon') {
-                if (confirm('Save this as the property boundary?')) {
-                    if (boundaryLayer) map.removeLayer(boundaryLayer);
-                    boundaryLayer = layer.addTo(map);
-                    saveBoundary(layer);
-                }
-            } else if (e.layerType === 'polyline') {
-                const distance = (layer.getLatLngs().reduce((acc, latlng, i, arr) => i === 0 ? 0 : acc + latlng.distanceTo(arr[i-1]), 0) * 1.09361).toFixed(1);
-                layer.bindPopup(`Distance: ${distance} yards`).addTo(map).openPopup();
-            }
-        });
-
         saveButton.addEventListener('click', () => {
             const name = blindNameInput.value.trim();
             if (name && currentLatLng) {
@@ -397,8 +424,13 @@
         document.getElementById('track-path-btn').addEventListener('click', togglePathTracking);
 
         // --- App Start ---
-        findMyLocation(); // Get initial location
-        checkSharedBlind(); // Check for shared links on load
+        // Wait for the DOM to be fully loaded before initializing the map
+        document.addEventListener('DOMContentLoaded', () => {
+            initializeMap();
+            initializeDrawControls();
+            setupAuthentication();
+            findMyLocation(); // Get initial location
+        });
     </script>
 </body>
 </html>
